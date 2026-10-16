@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>FundFlow | Sample reports</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 960px; margin: 48px auto; padding: 0 24px; color: #243044; }
+      table { width: 100%; border-collapse: collapse; margin-top: 24px; }
+      caption { text-align: left; font-weight: 600; margin-bottom: 12px; }
+      th, td { padding: 12px; border-bottom: 1px solid #d9dee7; text-align: left; }
+      th { background: #f4f6f9; }
+    </style>
+    <script src="report.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <h1>Fund reports</h1>
+      <p>Sample portal for FundFlow. All fund data is synthetic.</p>
+      <p id="report-status" role="status">Report data has not been added yet.</p>
+      <table id="fund-report">
+        <caption>Quarterly fund metrics</caption>
+        <thead>
+          <tr>
+            <th scope="col">Fund ID</th>
+            <th scope="col">Reporting period</th>
+            <th scope="col">Metric</th>
+            <th scope="col">Value</th>
+            <th scope="col">Currency</th>
+          </tr>
+        </thead>
+        <tbody id="report-rows"></tbody>
+      </table>
+    </main>
+  </body>
+</html>
