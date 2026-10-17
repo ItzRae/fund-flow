@@ -13,8 +13,14 @@ class FundPage:
         """ Open IVV fund page """
         self.page.goto(IVV_URL, wait_until="domcontentloaded")
 
-        # with self.page.expect_download() as download_info:
-        #     self.page.get_by_role("button", name="Data Download").click()
-
-        # # get the download object
-        # download = download_info.value
+    def download_holdings(self, destination):
+        """ Download the holdings CSV and save it to the destination. """
+        with self.page.expect_download() as download_info:
+            self.page.locator(
+                'a[data-id="holdings-document-download"]'
+            ).click()
+            
+        # get the download object
+        download = download_info.value
+        download.save_as(destination)
+        return destination
