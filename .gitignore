@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local downloads and browser test artifacts
+downloads/
+test-results/
