@@ -34,4 +34,16 @@ FUNDS = (
         url="https://www.ishares.com/us/products/239458/ishares-core-total-us-bond-market-etf",
         required_columns=(*_COMMON_COLUMNS, "CUSIP", "ISIN"),
     ),
+    FundConfig(
+        fund_id="IEFA",
+        name="iShares Core MSCI EAFE ETF",
+        url="https://www.ishares.com/us/products/244049/ishares-core-msci-eafe-etf",
+        required_columns=(*_COMMON_COLUMNS, "Ticker"),
+    ),
+    FundConfig(
+        fund_id="SHY",
+        name="iShares 1-3 Year Treasury Bond ETF",
+        url="https://www.ishares.com/us/products/239452/ishares-13-year-treasury-bond-etf",
+        required_columns=(*_COMMON_COLUMNS, "CUSIP", "ISIN"),
+    ),
 )
