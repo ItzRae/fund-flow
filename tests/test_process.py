@@ -1,6 +1,8 @@
 """check retrieval and temporary file cleanup without contacting aws."""
 
 from pathlib import Path
+from datetime import date
+from decimal import Decimal
 from unittest.mock import Mock
 
 import pytest
@@ -40,10 +42,14 @@ def test_process_parses_before_removing_temporary_file():
 
     client.download_file.side_effect = download
     report = process.process_report(client, bucket="bucket", key="report.csv")
-    assert report["report_date"] == "Oct 15, 2026"
-    assert report["holdings"] == [{"Name": "Example bond", "Asset Class": "Fixed Income",
+    assert report["report_date"] == date(2026, 10, 15)
+    assert report["rejected"] == []
+    assert report["accepted"] == [{
+        "name": "Example bond", "asset_class": "Fixed Income",
+        "market_value": Decimal("1000.00"), "weight_percent": Decimal("0.25"),
+        "raw": {"Name": "Example bond", "Asset Class": "Fixed Income",
                                    "Market Value": "1,000.00", "Weight (%)": "0.25",
-                                   "CUSIP": "000000001"}]
+                                   "CUSIP": "000000001"}}]
     assert not paths[0].parent.exists()
 
 

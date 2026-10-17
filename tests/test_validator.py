@@ -5,7 +5,79 @@ from decimal import Decimal
 
 import pytest
 
-from fundflow.validator import parse_decimal, parse_report_date
+from fundflow.validator import parse_decimal, parse_report_date, validate_report, validate_holding
+
+
+def test_validate_report_continues_after_bad_holding():
+    """ keep processing valid holdings after a rejected row """
+    valid = {
+        "Name": "Example fund holding",
+        "Asset Class": "Equity",
+        "Market Value": "1,250.00",
+        "Weight (%)": "2.50",
+    }
+    invalid = {**valid, "Market Value": "not a number"}
+
+    report = {
+        "report_date": "Oct 15, 2026",
+        "holdings": [valid, invalid, {**valid, "Name": "Later holding"}],
+    }
+
+    result = validate_report(report)
+    assert len(result["accepted"]) == 2 and len(result["rejected"]) == 1
+    assert result["accepted"][1]["name"] == "Later holding"
+    assert result["rejected"][0]["holding_number"] == 2
+    assert result["rejected"][0]["raw"] == invalid
+    assert "Market Value: Invalid numeric value" in result["rejected"][0]["reason"]
+
+
+@pytest.fixture
+def holding():
+    return {"Name": " Example bond ", "Asset Class": " Fixed Income ",
+            "Market Value": "-1,250.00", "Weight (%)": "0.00", "CUSIP": "000000001"}
+
+
+def test_clean_holding_preserves_raw_and_allows_zero_and_negative(holding):
+    original = holding.copy()
+    result = validate_holding(holding)
+    assert result["name"] == "Example bond"
+    assert result["asset_class"] == "Fixed Income"
+    assert result["market_value"] == Decimal("-1250.00")
+    assert result["weight_percent"] == Decimal("0.00")
+    assert holding == original
+    assert result["raw"] == original
+    assert result["raw"] is not holding
+
+
+@pytest.mark.parametrize("field", ["Name", "Asset Class", "Market Value", "Weight (%)"])
+@pytest.mark.parametrize("value", [None, "", "   ", "-"])
+def test_missing_required_holding_fields(holding, field, value):
+    # none here means the column is absent, not a literal csv cell value
+    if value is None:
+        del holding[field]
+    else:
+        holding[field] = value
+    with pytest.raises(ValueError):
+        validate_holding(holding)
+
+
+def test_weight_rejection_identifies_field(holding):
+    holding["Weight (%)"] = "bad"
+    with pytest.raises(ValueError, match=r"Weight \(%\): Invalid numeric value"):
+        validate_holding(holding)
+
+
+def test_invalid_date_fails_entire_report(holding):
+    with pytest.raises(ValueError, match="Invalid report date"):
+        validate_report({"report_date": "Feb 30, 2026", "holdings": [holding]})
+
+
+def test_all_invalid_holdings_are_rejected(holding):
+    holding["Name"] = ""
+    result = validate_report({"report_date": "Oct 15, 2026", "holdings": [holding]})
+    assert result["accepted"] == []
+    assert result["rejected"] == [{"holding_number": 1, "raw": holding,
+                                   "reason": "Missing holding name"}]
 
 
 @pytest.mark.parametrize(("raw_date", "expected"), [

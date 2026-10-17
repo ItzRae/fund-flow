@@ -2,6 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from fundflow.parser import parse_holdings
+from fundflow.validator import validate_report
 from fundflow.s3_handler import download_report
 
 def process_report(s3_client, *, bucket: str, key: str):
@@ -12,7 +13,7 @@ def process_report(s3_client, *, bucket: str, key: str):
         s3_file = download_report(s3_client, bucket=bucket, key=key, destination=destination)
         s3_parsed = parse_holdings(s3_file)
 
-        return s3_parsed
+        return validate_report(s3_parsed)
 
 
 if __name__ == "__main__":
@@ -39,4 +40,11 @@ if __name__ == "__main__":
     )
 
     print(f"Report date: {report['report_date']}")
-    print(f"Holdings: {len(report['holdings'])}")
+    print(f"Accepted: {len(report['accepted'])}")
+    print(f"Rejected: {len(report['rejected'])}")
+
+    for rejection in report["rejected"]:
+        print(
+            f"Holding {rejection['holding_number']}: "
+            f"{rejection['reason']}"
+        )
