@@ -1,25 +1,28 @@
-"""Page object for the IVV holdings download workflow."""
+"""Shared browser workflow for configured iShares fund pages."""
+
+from pathlib import Path
 
 from playwright.sync_api import Page
 
-IVV_URL = "https://www.ishares.com/us/products/239726/ishares-core-sp-500-etf"
+from fundflow.funds import FundConfig
 
 
 class FundPage:
-    def __init__(self, page: Page):
+    def __init__(self, page: Page, fund: FundConfig):
         self.page = page
+        self.fund = fund
 
-    def open(self):
-        """ Open IVV fund page """
-        self.page.goto(IVV_URL, wait_until="domcontentloaded")
+    def open(self) -> None:
+        """Open the configured fund page."""
+        self.page.goto(self.fund.url, wait_until="domcontentloaded")
 
-    def download_holdings(self, destination):
+    def download_holdings(self, destination: Path) -> Path:
         """ Download the holdings CSV and save it to the destination. """
         with self.page.expect_download() as download_info:
             self.page.locator(
                 'a[data-id="holdings-document-download"]'
             ).click()
-            
+
         # get the download object
         download = download_info.value
         download.save_as(destination)
