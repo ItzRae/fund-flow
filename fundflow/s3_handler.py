@@ -47,6 +47,14 @@ def upload_report(client, *, path: Path, bucket: str, fund_id: str,
     )
     return {"bucket": bucket, "key": key, "sha256": sha256, **metadata}
 
+def download_report(client, *, bucket: str, key: str, destination: Path) -> Path:
+    """ retrieve a saved report from s3 for local processing """
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    client.download_file(bucket, key, str(destination))
+
+    return destination
 
 if __name__ == "__main__":
     import argparse

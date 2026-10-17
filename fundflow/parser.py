@@ -15,7 +15,7 @@ def parse_holdings(path: Path):
 
     header_index = None
     for index, row in enumerate(rows):
-        if row and {"Ticker", "Name", "Market Value"}.issubset(row):
+        if row and {"Name", "Asset Class", "Market Value", "Weight (%)"}.issubset(row):
             header_index = index
             break
 

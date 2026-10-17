@@ -25,19 +25,19 @@ def test_parse_distinct_holdings_and_preserve_source_values(write_report):
         ["Fund Holdings as of", " Oct 15, 2026 "],
         ["Additional metadata", "can shift the header"],
         [],
-        ["Ticker", "Name", "Market Value", "Weight (%)"],
-        ["AAA", "Example, Inc.", "1,250.00", "2.50"],
+        ["Ticker", "Name", "Asset Class", "Market Value", "Weight (%)"],
+        ["AAA", "Example, Inc.", "Equity", "1,250.00", "2.50"],
         [],
-        ["BBB", "Second company", "0.00", "0.00"],
+        ["BBB", "Second company", "Equity", "0.00", "0.00"],
         [],
     ])
 
     assert parse_holdings(path) == {
         "report_date": "Oct 15, 2026",
         "holdings": [
-            {"Ticker": "AAA", "Name": "Example, Inc.",
+            {"Ticker": "AAA", "Name": "Example, Inc.", "Asset Class": "Equity",
              "Market Value": "1,250.00", "Weight (%)": "2.50"},
-            {"Ticker": "BBB", "Name": "Second company",
+            {"Ticker": "BBB", "Name": "Second company", "Asset Class": "Equity",
              "Market Value": "0.00", "Weight (%)": "0.00"},
         ],
     }
@@ -53,8 +53,8 @@ def test_missing_header(write_report):
                                       [["Fund Holdings as of", "   "]]])
 def test_missing_or_empty_date(write_report, metadata):
     path = write_report(metadata + [
-        ["Ticker", "Name", "Market Value"],
-        ["AAA", "Example", "1.00"],
+        ["Name", "Asset Class", "Market Value", "Weight (%)"],
+        ["Example", "Equity", "1.00", "0.10"],
     ])
     with pytest.raises(ValueError, match="Report date not found"):
         parse_holdings(path)
@@ -62,23 +62,49 @@ def test_missing_or_empty_date(write_report, metadata):
 
 @pytest.mark.parametrize("holding", [
     ["AAA", "Example"],
-    ["AAA", "Example", "1.00", "unexpected cell"],
+    ["Example", "Equity", "1.00", "0.10", "unexpected cell"],
 ])
 def test_reject_mismatched_row_width(write_report, holding):
     path = write_report([
         ["Fund Holdings as of", "Oct 15, 2026"],
-        ["Ticker", "Name", "Market Value"],
+        ["Name", "Asset Class", "Market Value", "Weight (%)"],
         holding,
     ])
-    with pytest.raises(ValueError, match="CSV row 3: expected 3 cells"):
+    with pytest.raises(ValueError, match="CSV row 3: expected 4 cells"):
         parse_holdings(path)
 
 
 def test_reject_report_without_holdings(write_report):
     path = write_report([
         ["Fund Holdings as of", "Oct 15, 2026"],
-        ["Ticker", "Name", "Market Value"],
+        ["Name", "Asset Class", "Market Value", "Weight (%)"],
         [],
     ])
     with pytest.raises(ValueError, match="No holdings rows found"):
+        parse_holdings(path)
+
+
+def test_parse_bonds_without_ticker_and_preserve_extra_columns(write_report):
+    """bond identifiers survive parsing even when the columns are reordered."""
+    headers = ["ISIN", "Weight (%)", "Name", "CUSIP", "Maturity",
+               "Market Value", "Asset Class"]
+    values = ["US0000000001", "0.25", "Example treasury", "000000001",
+              "Oct 15, 2028", "1,000.00", "Fixed Income"]
+    path = write_report([
+        ["Fund Holdings as of", "Oct 15, 2026"], headers, values,
+    ])
+    assert parse_holdings(path)["holdings"] == [{
+        "ISIN": "US0000000001", "Weight (%)": "0.25",
+        "Name": "Example treasury", "CUSIP": "000000001",
+        "Maturity": "Oct 15, 2028", "Market Value": "1,000.00",
+        "Asset Class": "Fixed Income",
+    }]
+
+
+@pytest.mark.parametrize("missing", ["Name", "Asset Class", "Market Value", "Weight (%)"])
+def test_require_each_shared_header(write_report, missing):
+    headers = [name for name in ["Name", "Asset Class", "Market Value", "Weight (%)"]
+               if name != missing]
+    path = write_report([["Fund Holdings as of", "Oct 15, 2026"], headers])
+    with pytest.raises(ValueError, match="Holdings column header not found"):
         parse_holdings(path)
