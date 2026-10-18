@@ -26,75 +26,105 @@ def ensure_indexes(database):
     database.holdings.create_index([("snapshot_id", 1), ("row_hash", 1)], unique=True)
 
 
-def store_report(database, *, report: dict, source: dict) -> dict:
-    """store an immutable snapshot and a separate record for each processing attempt
+# bump this when parsing or validation changes the meaning of stored holdings
+PROCESSING_VERSION = "1"
 
-    exact duplicate accepted rows are skipped. row hashes identify snapshot rows,
-    not securities across funds or dates. changed files create new snapshots.
+
+def new_attempt(source: dict) -> dict:
+    """give even an early failure an id, time, and source reference."""
+    return {"_id": str(uuid4()), "source": source,
+            "processing_version": PROCESSING_VERSION,
+            "started_at": datetime.now(timezone.utc), "status": "RUNNING",
+            "stage": "START", "inserted": 0, "unchanged": 0}
+
+
+def save_attempt(database, run: dict):
+    # upsert also works when the initial run write failed or never happened
+    database.processing_runs.update_one(
+        {"_id": run["_id"]},
+        {"$set": {key: value for key, value in run.items() if key != "_id"}},
+        upsert=True,
+    )
+
+
+def record_failure(database, run: dict, exc: Exception):
+    """record the stage without exposing credentials from driver error messages."""
+    run.update(status="FAILED", error_type=type(exc).__name__,
+               finished_at=datetime.now(timezone.utc))
+    # always keep a local fallback, including when mongodb itself is unavailable
+    logging.error(json.dumps({"run_id": run["_id"], "stage": run["stage"],
+                              "status": run["status"], "error_type": run["error_type"],
+                              "inserted": run["inserted"], "unchanged": run["unchanged"],
+                              "source_bucket": run["source"].get("bucket"),
+                              "source_key": run["source"].get("key")}))
+    if database is not None:
+        try:
+            save_attempt(database, run)
+        except Exception:
+            # failure recording must not replace the error that caused the failure
+            pass
+
+
+def store_report(database, *, report: dict, source: dict, attempt=None) -> dict:
+    """store a snapshot once; reject a different interpretation until explicitly rebuilt.
+
+    raw-row hashes prevent exact duplicates, not conflicting security positions.
+    versionless snapshots are treated as legacy and are never silently adopted.
     """
-    # same fund and file checksum produce the same snapshot ID
-    snapshot_id = stable_hash({"fund_id": source["fund-id"], "sha256": source["sha256"]})
-    # each processing attempt gets a fresh random ID + timestamp
-    run_id = str(uuid4())
-    now = datetime.now(timezone.utc)
-    documents = {}
-    for holding in report["accepted"]:
-        # deduplicate identical raw rows
-        row_hash = stable_hash(holding["raw"])
-        documents[row_hash] = {
-            "snapshot_id": snapshot_id, "row_hash": row_hash,
-            "fund_id": source["fund-id"], "report_date": report["report_date"].isoformat(),
-            **holding,
-            "market_value": Decimal128(holding["market_value"]),
-            "weight_percent": Decimal128(holding["weight_percent"]),
-            "source": source, "created_at": now,
-        }
-    run = {
-        "_id": run_id, "snapshot_id": snapshot_id, "source": source,
-        "started_at": now, "status": "RUNNING",
-        "received": len(report["accepted"]) + len(report["rejected"]),
-        "accepted": len(documents), "rejected": len(report["rejected"]),
-        "duplicates_skipped": len(report["accepted"]) - len(documents),
-        "inserted": 0, "unchanged": 0, "rejections": report["rejected"],
-    }
-    ensure_indexes(database)
-    database.processing_runs.insert_one(run.copy())
+    run = attempt if attempt is not None else new_attempt(source)
+    run["source"] = source
     try:
+        run["stage"] = "PREPARE_DOCUMENTS"
+        snapshot_id = stable_hash({"fund_id": source["fund-id"], "sha256": source["sha256"]})
+        run["snapshot_id"] = snapshot_id
+        documents = {}
+        for holding in report["accepted"]:
+            row_hash = stable_hash(holding["raw"])
+            documents[row_hash] = {
+                "snapshot_id": snapshot_id, "row_hash": row_hash,
+                "processing_version": PROCESSING_VERSION,
+                "fund_id": source["fund-id"], "report_date": report["report_date"].isoformat(),
+                **holding,
+                "market_value": Decimal128(holding["market_value"]),
+                "weight_percent": Decimal128(holding["weight_percent"]),
+                "source": source, "created_at": run["started_at"],
+            }
+        run.update(received=len(report["accepted"]) + len(report["rejected"]),
+                   accepted=len(documents), rejected=len(report["rejected"]),
+                   duplicates_skipped=len(report["accepted"]) - len(documents),
+                   rejections=report["rejected"])
+        run["stage"] = "ENSURE_INDEXES"
+        ensure_indexes(database)
+        run["stage"] = "RECORD_RUN"
+        save_attempt(database, run)
+        run["stage"] = "CHECK_PROCESSING_VERSION"
+        existing = database.report_snapshots.find_one({"_id": snapshot_id})
+        if existing is not None and existing.get("processing_version") != PROCESSING_VERSION:
+            raise ValueError("Snapshot processing version differs or is missing; an explicit rebuild is required")
+        run["stage"] = "WRITE_SNAPSHOT"
         database.report_snapshots.update_one(
-            # fields applied only during insertion
             {"_id": snapshot_id}, {"$setOnInsert": {
                 "fund_id": source["fund-id"], "file_sha256": source["sha256"],
+                "processing_version": PROCESSING_VERSION,
                 "report_date": report["report_date"].isoformat(), "source": source,
-                "created_at": now,
+                "created_at": run["started_at"],
             }}, upsert=True,
         )
+        run["stage"] = "WRITE_HOLDINGS"
         for row_hash, document in documents.items():
-            # for each holding
             result = database.holdings.update_one(
                 {"snapshot_id": snapshot_id, "row_hash": row_hash},
                 {"$setOnInsert": document}, upsert=True,
             )
-            # so report safely reprocessed wo duplicate holdings 
+            # these counts cover acknowledged writes; a lost reply can leave uncertainty
             run["inserted" if result.upserted_id is not None else "unchanged"] += 1
         run["status"] = ("VALIDATION_FAILED" if not documents else
-                         "COMPLETED_WITH_REJECTIONS" if run["rejected"] 
-                         else "COMPLETED")
+                         "COMPLETED_WITH_REJECTIONS" if run["rejected"] else "COMPLETED")
         run["finished_at"] = datetime.now(timezone.utc)
-        # updates an existing doc's fields,
-        # exclude _id bc mongodb's document ID is immutable
-        database.processing_runs.update_one({"_id": run_id}, {"$set": {
-            key: value for key, value in run.items() if key != "_id"
-        }})
-    except PyMongoError as exc:
-        # acknowledged writes remain stored; the same keys make retrying safe
-        failure = {"status": "DB_WRITE_FAILED", "error_type": type(exc).__name__,
-                   "inserted": run["inserted"], "unchanged": run["unchanged"],
-                   "finished_at": datetime.now(timezone.utc)}
-        try:
-            database.processing_runs.update_one({"_id": run_id}, {"$set": failure})
-        except PyMongoError:
-            logging.error(json.dumps({"run_id": run_id, "status": "DB_WRITE_FAILED",
-                                      "inserted": run["inserted"], "unchanged": run["unchanged"]}))
+        run["stage"] = "FINALIZE_RUN"
+        save_attempt(database, run)
+    except Exception as exc:
+        record_failure(database, run, exc)
         raise
     return run
 
