@@ -39,23 +39,74 @@ def process_report(s3_client, *, bucket: str, key: str, database=None):
                 storage_started = True
                 report["persistence"] = store_report(database, report=report, source=source, attempt=run)
             return report
-    except Exception as exc:
+    except (Exception, KeyboardInterrupt) as exc:
         if not storage_started:
             record_failure(database, run, exc)
         raise
 
+def process_batch(s3_client, *, summary: dict, database):
+    """ process each stored report and keep an outcome for every attempt """
 
-if __name__ == "__main__":
+    if database is None:
+        raise ValueError("Batch processing requires a database")
+    outcomes = []
+
+    for item in summary["results"]:
+        # skip reports that weren't successfully uploaded
+        if item["status"] != "STORED":
+            outcomes.append({
+                "fund_id": item["fund_id"],
+                "status": "SKIPPED",
+                "reason": "collection did not store a report",
+            })
+            continue
+
+        try:
+            source = item["source"]
+
+            report = process_report(
+                s3_client,
+                bucket=source["bucket"],
+                key=source["key"],
+                database=database
+            )
+
+            outcomes.append({
+                "fund_id": item["fund_id"],
+                "status": report["persistence"]["status"],
+                "inserted": report["persistence"]["inserted"],
+                "unchanged": report["persistence"]["unchanged"],
+            })
+
+        except Exception as exc:
+            outcomes.append({
+                "fund_id": item["fund_id"],
+                "status": "FAILED",
+                "error_type": type(exc).__name__
+            })
+
+    return outcomes
+
+def main(argv=None):
     import argparse
+    import json
     import boto3
 
     cli = argparse.ArgumentParser(description="Parse a report stored in s3.")
-    cli.add_argument("--bucket", required=True)
-    cli.add_argument("--key", required=True)
+    cli.add_argument("--bucket")
+    cli.add_argument("--key")
+    cli.add_argument("--summary", type=Path, help="Saved collection summary to process")
     cli.add_argument("--region", required=True)
     cli.add_argument("--profile", default=None)
     cli.add_argument("--store", action="store_true", help="Persist the validated snapshot in MongoDB")
-    args = cli.parse_args()
+    args = cli.parse_args(argv)
+    if args.summary:
+        if args.bucket or args.key:
+            cli.error("use --summary or --bucket/--key, not both")
+        if not args.store:
+            cli.error("batch processing requires --store")
+    elif not args.bucket or not args.key:
+        cli.error("provide --summary or both --bucket and --key")
 
     try:
         session = boto3.Session(
@@ -72,11 +123,19 @@ if __name__ == "__main__":
                 from fundflow.db import create_client
                 client = stack.enter_context(create_client())
                 database = client[os.environ.get("MONGODB_DATABASE", "fundflow")]
+            if args.summary:
+                summary = json.loads(args.summary.read_text(encoding="utf-8"))
+                outcomes = process_batch(s3_client, summary=summary, database=database)
+                print(json.dumps({"batch_id": summary.get("batch_id"), "results": outcomes}, indent=2))
+                return batch_exit_code(outcomes)
             report = process_report(s3_client, bucket=args.bucket, key=args.key, database=database)
+    except KeyboardInterrupt:
+        print("Processing interrupted; completed writes are preserved. Rerun safely to finish.")
+        return 130
     except Exception as exc:
         # detailed stages are logged by processing; never print a credential-bearing uri
         print(f"Processing failed ({type(exc).__name__}); see the stage in the error log.")
-        raise SystemExit(1)
+        return 1
 
     print(f"Report date: {report['report_date']}")
     print(f"Accepted: {len(report['accepted'])}")
@@ -90,3 +149,17 @@ if __name__ == "__main__":
             f"Holding {rejection['holding_number']}: "
             f"{rejection['reason']}"
         )
+
+    if "persistence" in report:
+        return batch_exit_code([report["persistence"]])
+    return 1 if not report["accepted"] else 0
+
+
+def batch_exit_code(outcomes):
+    """signal incomplete processing to a terminal or future scheduler."""
+    completed = {"COMPLETED", "COMPLETED_WITH_REJECTIONS"}
+    return 0 if outcomes and all(item["status"] in completed for item in outcomes) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -4,14 +4,15 @@ import os
 import hashlib
 import json
 import logging
+import sys
 from datetime import datetime, timezone
 from uuid import uuid4
 from pathlib import Path
 
 from bson.decimal128 import Decimal128
 from dotenv import load_dotenv
-from pymongo import MongoClient
-from pymongo.errors import PyMongoError
+from pymongo import MongoClient, UpdateOne
+from pymongo.errors import PyMongoError, BulkWriteError
 
 
 def stable_hash(value: dict) -> str:
@@ -47,14 +48,15 @@ def save_attempt(database, run: dict):
     )
 
 
-def record_failure(database, run: dict, exc: Exception):
+def record_failure(database, run: dict, exc: BaseException):
     """record the stage without exposing credentials from driver error messages."""
-    run.update(status="FAILED", error_type=type(exc).__name__,
+    run.update(status="INTERRUPTED" if isinstance(exc, KeyboardInterrupt) else "FAILED", error_type=type(exc).__name__,
                finished_at=datetime.now(timezone.utc))
     # always keep a local fallback, including when mongodb itself is unavailable
     logging.error(json.dumps({"run_id": run["_id"], "stage": run["stage"],
                               "status": run["status"], "error_type": run["error_type"],
                               "inserted": run["inserted"], "unchanged": run["unchanged"],
+                              "write_outcome_uncertain": run.get("write_outcome_uncertain", False),
                               "source_bucket": run["source"].get("bucket"),
                               "source_key": run["source"].get("key")}))
     if database is not None:
@@ -65,7 +67,7 @@ def record_failure(database, run: dict, exc: Exception):
             pass
 
 
-def store_report(database, *, report: dict, source: dict, attempt=None) -> dict:
+def store_report(database, *, report: dict, source: dict, attempt=None, batch_size=250) -> dict:
     """store a snapshot once; reject a different interpretation until explicitly rebuilt.
 
     raw-row hashes prevent exact duplicates, not conflicting security positions.
@@ -75,6 +77,8 @@ def store_report(database, *, report: dict, source: dict, attempt=None) -> dict:
     run["source"] = source
     try:
         run["stage"] = "PREPARE_DOCUMENTS"
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
         snapshot_id = stable_hash({"fund_id": source["fund-id"], "sha256": source["sha256"]})
         run["snapshot_id"] = snapshot_id
         documents = {}
@@ -111,19 +115,43 @@ def store_report(database, *, report: dict, source: dict, attempt=None) -> dict:
             }}, upsert=True,
         )
         run["stage"] = "WRITE_HOLDINGS"
-        for row_hash, document in documents.items():
-            result = database.holdings.update_one(
+        run.update(processed=0, batch_size=batch_size, write_outcome_uncertain=False)
+        save_attempt(database, run)
+        entries = list(documents.items())
+        for offset in range(0, len(entries), batch_size):
+            chunk = entries[offset:offset + batch_size]
+            operations = [UpdateOne(
                 {"snapshot_id": snapshot_id, "row_hash": row_hash},
                 {"$setOnInsert": document}, upsert=True,
-            )
-            # these counts cover acknowledged writes; a lost reply can leave uncertainty
-            run["inserted" if result.upserted_id is not None else "unchanged"] += 1
+            ) for row_hash, document in chunk]
+            # a lost reply or ctrl+c during a request can leave its outcome unknown
+            run["write_outcome_uncertain"] = True
+            try:
+                result = database.holdings.bulk_write(operations, ordered=True)
+            except BulkWriteError as exc:
+                details = exc.details
+                # write-concern failures don't give us the same durability assurance
+                if not details.get("writeConcernErrors"):
+                    run["inserted"] += details.get("nUpserted", 0)
+                    run["unchanged"] += details.get("nMatched", 0)
+                    run["write_outcome_uncertain"] = False
+                run["processed"] = run["inserted"] + run["unchanged"]
+                raise
+            run["inserted"] += result.upserted_count
+            run["unchanged"] += result.matched_count
+            run["processed"] = run["inserted"] + run["unchanged"]
+            run["write_outcome_uncertain"] = False
+            run["updated_at"] = datetime.now(timezone.utc)
+            save_attempt(database, run)
+            print(f"{source['fund-id']}: {run['processed']}/{len(entries)} holdings "
+                  f"({run['inserted']} inserted, {run['unchanged']} unchanged)",
+                  file=sys.stderr, flush=True)
         run["status"] = ("VALIDATION_FAILED" if not documents else
                          "COMPLETED_WITH_REJECTIONS" if run["rejected"] else "COMPLETED")
         run["finished_at"] = datetime.now(timezone.utc)
         run["stage"] = "FINALIZE_RUN"
         save_attempt(database, run)
-    except Exception as exc:
+    except (Exception, KeyboardInterrupt) as exc:
         record_failure(database, run, exc)
         raise
     return run

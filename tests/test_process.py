@@ -117,7 +117,7 @@ def test_integrity_failure_prevents_parsing_and_writes(monkeypatch, metadata, me
     assert not paths[0].parent.exists()
     assert 'VERIFY_CHECKSUM' in caplog.text
     if persist:
-        db.holdings.update_one.assert_not_called()
+        db.holdings.bulk_write.assert_not_called()
         assert db.processing_runs.update_one.call_args.args[1]['$set']['stage'] == 'VERIFY_CHECKSUM'
 
 
@@ -135,4 +135,71 @@ def test_pre_storage_failures_are_recorded(date_text, stage):
     with pytest.raises(ValueError):
         process.process_report(client, bucket='bucket', key='report.csv', database=db)
     assert db.processing_runs.update_one.call_args.args[1]['$set']['stage'] == stage
-    db.holdings.update_one.assert_not_called()
+    db.holdings.bulk_write.assert_not_called()
+
+
+def test_batch_continues_and_preserves_outcomes(monkeypatch):
+    worker = Mock(side_effect=[RuntimeError('failed'),
+                              {'persistence': {'status': 'COMPLETED_WITH_REJECTIONS',
+                                               'inserted': 2, 'unchanged': 3}}])
+    monkeypatch.setattr(process, 'process_report', worker)
+    summary = {'results': [
+        {'fund_id': 'SKIP', 'status': 'FAILED'},
+        {'fund_id': 'BAD', 'status': 'STORED', 'source': {'bucket': 'b', 'key': 'bad'}},
+        {'fund_id': 'GOOD', 'status': 'STORED', 'source': {'bucket': 'b', 'key': 'good'}},
+    ]}
+    outcomes = process.process_batch(Mock(), summary=summary, database=Mock())
+    assert [r['status'] for r in outcomes] == ['SKIPPED', 'FAILED', 'COMPLETED_WITH_REJECTIONS']
+    assert outcomes[1]['error_type'] == 'RuntimeError'
+    assert outcomes[2]['inserted'] == 2
+    assert worker.call_count == 2
+
+
+def test_missing_source_does_not_stop_batch(monkeypatch):
+    worker = Mock(return_value={'persistence': {'status': 'VALIDATION_FAILED', 'inserted': 0, 'unchanged': 0}})
+    monkeypatch.setattr(process, 'process_report', worker)
+    summary = {'results': [{'fund_id': 'BAD', 'status': 'STORED'},
+                            {'fund_id': 'NEXT', 'status': 'STORED',
+                             'source': {'bucket': 'b', 'key': 'k'}}]}
+    outcomes = process.process_batch(Mock(), summary=summary, database=Mock())
+    assert [r['status'] for r in outcomes] == ['FAILED', 'VALIDATION_FAILED']
+    worker.assert_called_once()
+
+
+@pytest.mark.parametrize('statuses,expected', [
+    (['COMPLETED', 'COMPLETED_WITH_REJECTIONS'], 0),
+    (['COMPLETED', 'FAILED'], 1),
+    (['VALIDATION_FAILED'], 1), (['SKIPPED'], 1), ([], 1),
+])
+def test_batch_exit_status(statuses, expected):
+    assert process.batch_exit_code([{'status': s} for s in statuses]) == expected
+
+
+@pytest.mark.parametrize('arguments', [
+    ['--summary', 'batch.json'],
+    ['--summary', 'batch.json', '--store', '--bucket', 'b'],
+    ['--bucket', 'b'],
+])
+def test_cli_rejects_incomplete_or_conflicting_arguments(arguments):
+    with pytest.raises(SystemExit) as caught:
+        process.main(['--region', 'us-east-2', *arguments])
+    assert caught.value.code == 2
+
+
+def test_interrupt_during_retrieval_records_interrupted_run():
+    client, db = Mock(), Mock()
+    client.download_file.side_effect = KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt):
+        process.process_report(client, bucket='bucket', key='report.csv', database=db)
+    run = db.processing_runs.update_one.call_args.args[1]['$set']
+    assert run['status'] == 'INTERRUPTED'
+    assert run['stage'] == 'DOWNLOAD'
+
+
+def test_batch_interrupt_stops_remaining_reports(monkeypatch):
+    worker = Mock(side_effect=KeyboardInterrupt())
+    monkeypatch.setattr(process, 'process_report', worker)
+    item = {'fund_id': 'IVV', 'status': 'STORED', 'source': {'bucket': 'b', 'key': 'k'}}
+    with pytest.raises(KeyboardInterrupt):
+        process.process_batch(Mock(), summary={'results': [item, item]}, database=Mock())
+    worker.assert_called_once()
