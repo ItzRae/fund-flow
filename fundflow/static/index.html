@@ -27,6 +27,9 @@
     section { margin-top: 36px; }
     h2 { font-size: 22px; margin: 0; }
     .run-id { font-family: monospace; font-size: 12px; }
+    .actions { display: flex; gap: 8px; }
+    .pagination { display: flex; gap: 12px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
+    .numeric { text-align: right; font-variant-numeric: tabular-nums; }
     footer { margin-top: 20px; font-size: 13px; color: #5e6d67; }
     @media (max-width: 600px) { main { margin-top: 28px; } header { align-items: flex-start; } }
   </style>
@@ -41,7 +44,7 @@
     <div class="table-wrap">
       <table>
         <caption>Fund overview</caption>
-        <thead><tr><th scope="col">Fund</th><th scope="col">Report date</th><th scope="col">Accepted</th><th scope="col">Rejected</th><th scope="col">Latest outcome</th><th scope="col">History</th></tr></thead>
+        <thead><tr><th scope="col">Fund</th><th scope="col">Report date</th><th scope="col">Accepted</th><th scope="col">Rejected</th><th scope="col">Latest outcome</th><th scope="col">Reports</th></tr></thead>
         <tbody id="funds"></tbody>
       </table>
     </div>
@@ -56,6 +59,24 @@
           <tbody id="history-rows"></tbody>
         </table>
       </div>
+    </section>
+    <section id="holdings" aria-labelledby="holdings-title" hidden>
+      <header><h2 id="holdings-title" tabindex="-1">Holdings</h2><button id="close-holdings" class="secondary" type="button">Close holdings</button></header>
+      <p>Latest successfully processed report. This may be older than the latest attempt shown above.</p>
+      <p id="holdings-message" role="status" aria-live="polite"></p>
+      <div class="table-wrap">
+        <table>
+          <caption id="holdings-caption">Report holdings</caption>
+          <thead><tr><th scope="col">Name</th><th scope="col">Asset class</th><th scope="col" class="numeric">Market value</th><th scope="col" class="numeric">Weight (%)</th></tr></thead>
+          <tbody id="holdings-rows"></tbody>
+        </table>
+      </div>
+      <nav class="pagination" aria-label="Holdings pages">
+        <button id="holdings-prev" class="secondary" type="button" disabled>Previous</button>
+        <span id="holdings-range"></span>
+        <button id="holdings-next" class="secondary" type="button" disabled>Next</button>
+        <button id="holdings-retry" class="secondary" type="button" hidden>Retry</button>
+      </nav>
     </section>
     <footer>Read-only overview · Refresh reads saved results; it does not collect or process reports.</footer>
   </main>
@@ -117,11 +138,103 @@
     }
     document.querySelector('#close-history').addEventListener('click', closeHistory);
 
+    const holdingsPanel = document.querySelector('#holdings');
+    const holdingsTitle = document.querySelector('#holdings-title');
+    const holdingsMessage = document.querySelector('#holdings-message');
+    const holdingsRows = document.querySelector('#holdings-rows');
+    const holdingsCaption = document.querySelector('#holdings-caption');
+    const holdingsRange = document.querySelector('#holdings-range');
+    const previous = document.querySelector('#holdings-prev');
+    const next = document.querySelector('#holdings-next');
+    const retry = document.querySelector('#holdings-retry');
+    let holdingsRequest = 0;
+    let holdingsFund = null;
+    let holdingsOffset = 0;
+    let holdingsSnapshot = null;
+    let holdingsTrigger = null;
+    const pageSize = 50;
+
+    function closeHoldings() {
+      holdingsRequest++;
+      holdingsPanel.hidden = true;
+      if (holdingsTrigger?.isConnected) holdingsTrigger.focus();
+    }
+
+    // group digits as text so decimal strings never lose precision through Number
+    function formatDecimal(value) {
+      if (value == null) return '—';
+      const [whole, fraction] = String(value).split('.');
+      return whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (fraction === undefined ? '' : `.${fraction}`);
+    }
+
+    async function loadHoldings(fundId, offset = 0, trigger = null) {
+      const requestId = ++holdingsRequest;
+      if (trigger) {
+        holdingsTrigger = trigger;
+        holdingsSnapshot = null;
+      }
+      holdingsFund = fundId;
+      holdingsOffset = offset;
+      holdingsPanel.hidden = false;
+      holdingsTitle.textContent = `${fundId} holdings`;
+      if (trigger) holdingsTitle.focus();
+      holdingsRows.replaceChildren();
+      holdingsCaption.textContent = 'Report holdings';
+      holdingsRange.textContent = '';
+      holdingsMessage.textContent = 'Loading holdings…';
+      previous.disabled = next.disabled = true;
+      retry.hidden = true;
+      try {
+        const response = await fetch(`/api/funds/${encodeURIComponent(fundId)}/holdings?offset=${offset}&limit=${pageSize}`);
+        if (requestId !== holdingsRequest) return;
+        if (response.status === 404) {
+          holdingsMessage.textContent = 'No successfully processed report is available for this fund.';
+          return;
+        }
+        if (!response.ok) throw new Error('request failed');
+        const data = await response.json();
+        if (requestId !== holdingsRequest) return;
+        if (!Array.isArray(data.holdings) || !Number.isInteger(data.total)) throw new Error('unexpected response');
+        // the endpoint selects the latest snapshot on each call; restart if it changed
+        if (holdingsSnapshot && holdingsSnapshot !== data.snapshot_id && offset > 0) {
+          holdingsSnapshot = data.snapshot_id;
+          return loadHoldings(fundId, 0);
+        }
+        holdingsSnapshot = data.snapshot_id;
+        for (const holding of data.holdings) {
+          const row = document.createElement('tr');
+          for (const field of ['name', 'asset_class', 'market_value', 'weight_percent']) {
+            const cell = document.createElement('td');
+            const numeric = field === 'market_value' || field === 'weight_percent';
+            cell.textContent = numeric ? formatDecimal(holding[field]) : (holding[field] ?? '—');
+            if (numeric) cell.className = 'numeric';
+            row.append(cell);
+          }
+          holdingsRows.append(row);
+        }
+        holdingsCaption.textContent = `${fundId} · Report date: ${data.report_date ?? 'Unavailable'}`;
+        holdingsMessage.textContent = data.total ? `${data.total.toLocaleString()} holdings in this report.` : 'This report has no holdings.';
+        holdingsRange.textContent = data.holdings.length ? `${offset + 1}–${offset + data.holdings.length} of ${data.total.toLocaleString()}` : 'No rows on this page';
+        previous.disabled = offset === 0;
+        next.disabled = offset + pageSize >= data.total;
+      } catch {
+        if (requestId !== holdingsRequest) return;
+        holdingsRows.replaceChildren();
+        holdingsMessage.textContent = 'Could not load holdings. Please retry.';
+        retry.hidden = false;
+      }
+    }
+    document.querySelector('#close-holdings').addEventListener('click', closeHoldings);
+    previous.addEventListener('click', () => loadHoldings(holdingsFund, Math.max(0, holdingsOffset - pageSize)));
+    next.addEventListener('click', () => loadHoldings(holdingsFund, holdingsOffset + pageSize));
+    retry.addEventListener('click', () => loadHoldings(holdingsFund, holdingsOffset));
+
     async function loadFunds() {
       button.disabled = true;
       message.textContent = 'Loading reports…';
       rows.replaceChildren();
       closeHistory();
+      closeHoldings();
       try {
         const response = await fetch('/api/funds');
         if (response.status === 501) {
@@ -147,7 +260,17 @@
           viewButton.setAttribute('aria-label', `View history for ${fund.fund_id}`);
           viewButton.setAttribute('aria-controls', 'history');
           viewButton.addEventListener('click', () => loadHistory(fund.fund_id, viewButton));
-          actionCell.append(viewButton);
+          const actions = document.createElement('div');
+          actions.className = 'actions';
+          const holdingsButton = document.createElement('button');
+          holdingsButton.type = 'button';
+          holdingsButton.className = 'secondary';
+          holdingsButton.textContent = 'View holdings';
+          holdingsButton.setAttribute('aria-label', `View holdings for ${fund.fund_id}`);
+          holdingsButton.setAttribute('aria-controls', 'holdings');
+          holdingsButton.addEventListener('click', () => loadHoldings(fund.fund_id, 0, holdingsButton));
+          actions.append(holdingsButton, viewButton);
+          actionCell.append(actions);
           row.append(actionCell);
           rows.append(row);
         }

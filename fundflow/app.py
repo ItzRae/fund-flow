@@ -5,7 +5,7 @@ from pathlib import Path
 from pymongo import DESCENDING
 from pymongo.errors import PyMongoError
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
 from fundflow.db import create_client
@@ -105,4 +105,67 @@ def list_fund_runs(fund_id: str, request: Request):
     except PyMongoError:
         raise HTTPException(
             status_code=503, detail="Could not load fund results. Try again later."
+        ) from None
+
+
+@app.get("/api/funds/{fund_id}/holdings")
+def list_fund_holdings(
+    fund_id: str,
+    request: Request,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=100),
+):
+    database = request.app.state.database
+    try:
+        run = database["processing_runs"].find_one(
+            {
+                "source.fund-id": fund_id,
+                "status": {"$in": ["COMPLETED", "COMPLETED_WITH_REJECTIONS"]},
+            },
+            sort=[("started_at", DESCENDING), ("_id", DESCENDING)],
+        )
+        if run is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No successfully processed report found for this fund.",
+            )
+
+        snapshot_id = run["snapshot_id"]
+        snapshot = database["report_snapshots"].find_one({"_id": snapshot_id})
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="Report snapshot not found.")
+
+        # count the whole report, then fetch just the requested page
+        holdings_filter = {"snapshot_id": snapshot_id}
+        total = database["holdings"].count_documents(holdings_filter)
+        results = (
+            database["holdings"].find(holdings_filter)
+            .sort("row_hash", 1)
+            .skip(offset)
+            .limit(limit)
+        )
+
+        holdings = []
+        for holding in results:
+            # each dictionary here represents one holding, not the whole response
+            holdings.append({
+                "name": holding["name"],
+                "asset_class": holding["asset_class"],
+                "market_value": str(holding["market_value"].to_decimal()),
+                "weight_percent": str(holding["weight_percent"].to_decimal()),
+            })
+
+        # report details and pagination belong outside the list of holdings
+        return {
+            "fund_id": fund_id,
+            "snapshot_id": snapshot_id,
+            "report_date": snapshot["report_date"],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "holdings": holdings,
+        }
+    except PyMongoError:
+        raise HTTPException(
+            status_code=503, detail="Could not load holdings. Try again later."
         ) from None
