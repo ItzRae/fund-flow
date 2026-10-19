@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FundFlow | Operations</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; color: #20312c; background: #f5f7f5; }
+    body { margin: 0; }
+    main { max-width: 1080px; margin: 64px auto; padding: 0 24px; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 24px; }
+    h1 { font-size: 32px; letter-spacing: -1px; margin: 8px 0; }
+    .eyebrow { color: #507368; font-size: 12px; letter-spacing: 2px; text-transform: uppercase; }
+    p { color: #5e6d67; line-height: 1.6; }
+    button { background: #244e40; color: white; border: 0; border-radius: 6px; padding: 12px 18px; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: wait; }
+    button:focus-visible { outline: 3px solid #86b9a6; outline-offset: 3px; }
+    .table-wrap { overflow-x: auto; background: white; border: 1px solid #dce4df; border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; text-align: left; white-space: nowrap; }
+    caption { text-align: left; padding: 20px; font-weight: 600; }
+    th { font-size: 12px; color: #5e6d67; background: #f0f4f1; }
+    td, th { padding: 16px 20px; border-top: 1px solid #e7ece8; }
+    td { font-size: 14px; }
+    .status { font-size: 12px; font-weight: 600; }
+    footer { margin-top: 20px; font-size: 13px; color: #5e6d67; }
+    @media (max-width: 600px) { main { margin-top: 28px; } header { align-items: flex-start; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div><span class="eyebrow">FundFlow / Operations</span><h1>Holdings reports</h1><p>The latest processing attempt for each fund.</p></div>
+      <button id="refresh" type="button">Refresh</button>
+    </header>
+    <p id="message" role="status" aria-live="polite">Loading reports…</p>
+    <div class="table-wrap">
+      <table>
+        <caption>Fund overview</caption>
+        <thead><tr><th scope="col">Fund</th><th scope="col">Report date</th><th scope="col">Accepted</th><th scope="col">Rejected</th><th scope="col">Latest outcome</th></tr></thead>
+        <tbody id="funds"></tbody>
+      </table>
+    </div>
+    <footer>Read-only overview · Refresh reads saved results; it does not collect or process reports.</footer>
+  </main>
+  <script>
+    const button = document.querySelector('#refresh');
+    const message = document.querySelector('#message');
+    const rows = document.querySelector('#funds');
+
+    async function loadFunds() {
+      button.disabled = true;
+      message.textContent = 'Loading reports…';
+      rows.replaceChildren();
+      try {
+        const response = await fetch('/api/funds');
+        if (response.status === 501) {
+          message.textContent = 'The page is ready. Implement GET /api/funds to show your saved results.';
+          return;
+        }
+        if (!response.ok) throw new Error('request failed');
+        const data = await response.json();
+        if (!Array.isArray(data.funds)) throw new Error('unexpected response');
+        for (const fund of data.funds) {
+          const row = document.createElement('tr');
+          for (const field of ['fund_id', 'report_date', 'accepted', 'rejected', 'status']) {
+            const cell = document.createElement('td');
+            cell.textContent = fund[field] ?? '—';
+            if (field === 'status') cell.className = 'status';
+            row.append(cell);
+          }
+          rows.append(row);
+        }
+        message.textContent = data.funds.length ? `Loaded ${data.funds.length} funds. Refreshed at ${new Date().toLocaleTimeString()}.` : 'No processing results yet.';
+      } catch {
+        rows.replaceChildren();
+        message.textContent = 'Could not load results. Check that the server and database are available, then refresh.';
+      } finally {
+        button.disabled = false;
+      }
+    }
+    button.addEventListener('click', loadFunds);
+    loadFunds();
+  </script>
+</body>
+</html>
