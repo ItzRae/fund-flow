@@ -25,6 +25,11 @@
     .status { font-size: 12px; font-weight: 600; }
     .secondary { background: #eaf0ec; color: #244e40; padding: 8px 12px; }
     section { margin-top: 36px; }
+    dialog { box-sizing: border-box; width: min(1160px, calc(100% - 32px)); max-height: 85dvh; padding: 24px; border: 1px solid #dce4df; border-radius: 12px; color: inherit; background: #f5f7f5; box-shadow: 0 24px 80px #10271d40; overflow: auto; }
+    dialog::backdrop { background: #10271d80; }
+    body:has(dialog[open]) { overflow: hidden; }
+    dialog header button { flex-shrink: 0; }
+    @media (max-width: 600px) { dialog { padding: 16px; } dialog h2 { font-size: 19px; } }
     h2 { font-size: 22px; margin: 0; }
     .run-id { font-family: monospace; font-size: 12px; }
     .actions { display: flex; gap: 8px; }
@@ -51,7 +56,7 @@
         <tbody id="funds"></tbody>
       </table>
     </div>
-    <section id="history" aria-labelledby="history-title" hidden>
+    <dialog id="history" aria-labelledby="history-title">
       <header><h2 id="history-title" tabindex="-1">Processing history</h2><button id="close-history" class="secondary" type="button">Close history</button></header>
       <p>Up to 20 recent attempts, newest first. Times are shown in your local timezone. Accepted counts describe validation; inserted and unchanged describe acknowledged writes.</p>
       <p id="history-message" role="status" aria-live="polite"></p>
@@ -62,7 +67,7 @@
           <tbody id="history-rows"></tbody>
         </table>
       </div>
-    </section>
+    </dialog>
     <section id="holdings" aria-labelledby="holdings-title" hidden>
       <header><h2 id="holdings-title" tabindex="-1">Holdings</h2><button id="close-holdings" class="secondary" type="button">Close holdings</button></header>
       <p>Latest successfully processed report. This may be older than the latest attempt shown above.</p>
@@ -105,14 +110,14 @@
     function closeHistory() {
       // ignore replies from requests made before the panel was closed
       historyRequest++;
-      history.hidden = true;
+      if (history.open) history.close();
       if (historyTrigger?.isConnected) historyTrigger.focus();
     }
 
     async function loadHistory(fundId, trigger) {
       const requestId = ++historyRequest;
       historyTrigger = trigger;
-      history.hidden = false;
+      if (!history.open) history.showModal();
       historyTitle.textContent = `${fundId} processing history`;
       historyTitle.focus();
       historyRows.replaceChildren();
@@ -148,6 +153,14 @@
       }
     }
     document.querySelector('#close-history').addEventListener('click', closeHistory);
+    history.addEventListener('cancel', event => {
+      event.preventDefault();
+      closeHistory();
+    });
+    history.addEventListener('click', event => {
+      const bounds = history.getBoundingClientRect();
+      if (event.target === history && (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom)) closeHistory();
+    });
 
     const holdingsPanel = document.querySelector('#holdings');
     const holdingsTitle = document.querySelector('#holdings-title');
@@ -299,6 +312,7 @@
           viewButton.textContent = 'View history';
           viewButton.setAttribute('aria-label', `View history for ${fund.fund_id}`);
           viewButton.setAttribute('aria-controls', 'history');
+          viewButton.setAttribute('aria-haspopup', 'dialog');
           viewButton.addEventListener('click', () => loadHistory(fund.fund_id, viewButton));
           const actions = document.createElement('div');
           actions.className = 'actions';
