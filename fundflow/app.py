@@ -70,3 +70,39 @@ def list_funds(request: Request):
         raise HTTPException(
             status_code=503, detail="Could not load fund results. Try again later."
         ) from None
+
+
+@app.get("/api/funds/{fund_id}/runs")
+def list_fund_runs(fund_id: str, request: Request):
+    database = request.app.state.database
+
+    try:
+        # dot notation for nested dict
+        results = database["processing_runs"].find({"source.fund-id": fund_id})
+        results.sort([
+            ("started_at", DESCENDING),
+            ("_id", DESCENDING)
+        ]).limit(20)
+        runs = []
+
+        for run in results:
+            run_id = run.get("_id")
+
+            if not run_id:
+                continue
+
+            runs.append({
+                "run_id": run_id,
+                "status": run.get("status"),
+                "started_at": run.get("started_at"),
+                "accepted": run.get("accepted"),
+                "rejected": run.get("rejected"),
+                "inserted": run.get("inserted"),
+                "unchanged": run.get("unchanged")
+            })
+
+        return {"fund_id": fund_id, "runs": runs}
+    except PyMongoError:
+        raise HTTPException(
+            status_code=503, detail="Could not load fund results. Try again later."
+        ) from None

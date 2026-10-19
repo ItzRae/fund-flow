@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FundFlow | Operations</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23244e40'/%3E%3Ctext x='9' y='24' fill='white' font-family='sans-serif' font-size='24'%3EF%3C/text%3E%3C/svg%3E">
   <style>
     :root { font-family: system-ui, sans-serif; color: #20312c; background: #f5f7f5; }
     body { margin: 0; }
@@ -22,6 +23,10 @@
     td, th { padding: 16px 20px; border-top: 1px solid #e7ece8; }
     td { font-size: 14px; }
     .status { font-size: 12px; font-weight: 600; }
+    .secondary { background: #eaf0ec; color: #244e40; padding: 8px 12px; }
+    section { margin-top: 36px; }
+    h2 { font-size: 22px; margin: 0; }
+    .run-id { font-family: monospace; font-size: 12px; }
     footer { margin-top: 20px; font-size: 13px; color: #5e6d67; }
     @media (max-width: 600px) { main { margin-top: 28px; } header { align-items: flex-start; } }
   </style>
@@ -36,21 +41,87 @@
     <div class="table-wrap">
       <table>
         <caption>Fund overview</caption>
-        <thead><tr><th scope="col">Fund</th><th scope="col">Report date</th><th scope="col">Accepted</th><th scope="col">Rejected</th><th scope="col">Latest outcome</th></tr></thead>
+        <thead><tr><th scope="col">Fund</th><th scope="col">Report date</th><th scope="col">Accepted</th><th scope="col">Rejected</th><th scope="col">Latest outcome</th><th scope="col">History</th></tr></thead>
         <tbody id="funds"></tbody>
       </table>
     </div>
+    <section id="history" aria-labelledby="history-title" hidden>
+      <header><h2 id="history-title" tabindex="-1">Processing history</h2><button id="close-history" class="secondary" type="button">Close history</button></header>
+      <p>Up to 20 recent attempts, newest first. Times are shown in your local timezone. Accepted counts describe validation; inserted and unchanged describe acknowledged writes.</p>
+      <p id="history-message" role="status" aria-live="polite"></p>
+      <div class="table-wrap">
+        <table>
+          <caption>Processing attempts</caption>
+          <thead><tr><th scope="col">Started</th><th scope="col">Outcome</th><th scope="col">Accepted</th><th scope="col">Rejected</th><th scope="col">Inserted</th><th scope="col">Unchanged</th><th scope="col">Run ID</th></tr></thead>
+          <tbody id="history-rows"></tbody>
+        </table>
+      </div>
+    </section>
     <footer>Read-only overview · Refresh reads saved results; it does not collect or process reports.</footer>
   </main>
   <script>
     const button = document.querySelector('#refresh');
     const message = document.querySelector('#message');
     const rows = document.querySelector('#funds');
+    const history = document.querySelector('#history');
+    const historyTitle = document.querySelector('#history-title');
+    const historyMessage = document.querySelector('#history-message');
+    const historyRows = document.querySelector('#history-rows');
+    let historyRequest = 0;
+    let historyTrigger = null;
+
+    function closeHistory() {
+      // ignore replies from requests made before the panel was closed
+      historyRequest++;
+      history.hidden = true;
+      if (historyTrigger?.isConnected) historyTrigger.focus();
+    }
+
+    async function loadHistory(fundId, trigger) {
+      const requestId = ++historyRequest;
+      historyTrigger = trigger;
+      history.hidden = false;
+      historyTitle.textContent = `${fundId} processing history`;
+      historyTitle.focus();
+      historyRows.replaceChildren();
+      historyMessage.textContent = 'Loading history…';
+      try {
+        const response = await fetch(`/api/funds/${encodeURIComponent(fundId)}/runs`);
+        if (!response.ok) throw new Error('request failed');
+        const data = await response.json();
+        // a slower reply for a previously selected fund must not replace this one
+        if (requestId !== historyRequest) return;
+        if (!Array.isArray(data.runs)) throw new Error('unexpected response');
+        for (const run of data.runs) {
+          const row = document.createElement('tr');
+          for (const field of ['started_at', 'status', 'accepted', 'rejected', 'inserted', 'unchanged', 'run_id']) {
+            const cell = document.createElement('td');
+            let value = run[field] ?? '—';
+            if (field === 'started_at' && run[field]) {
+              const date = new Date(run[field]);
+              value = Number.isNaN(date.getTime()) ? '—' : date.toLocaleString();
+            }
+            cell.textContent = value;
+            if (field === 'status') cell.className = 'status';
+            if (field === 'run_id') cell.className = 'run-id';
+            row.append(cell);
+          }
+          historyRows.append(row);
+        }
+        historyMessage.textContent = data.runs.length ? `Showing ${data.runs.length} recent attempts.` : 'No processing attempts found for this fund.';
+      } catch {
+        if (requestId !== historyRequest) return;
+        historyRows.replaceChildren();
+        historyMessage.textContent = 'Could not load history. Select View history again to retry.';
+      }
+    }
+    document.querySelector('#close-history').addEventListener('click', closeHistory);
 
     async function loadFunds() {
       button.disabled = true;
       message.textContent = 'Loading reports…';
       rows.replaceChildren();
+      closeHistory();
       try {
         const response = await fetch('/api/funds');
         if (response.status === 501) {
@@ -68,6 +139,16 @@
             if (field === 'status') cell.className = 'status';
             row.append(cell);
           }
+          const actionCell = document.createElement('td');
+          const viewButton = document.createElement('button');
+          viewButton.type = 'button';
+          viewButton.className = 'secondary';
+          viewButton.textContent = 'View history';
+          viewButton.setAttribute('aria-label', `View history for ${fund.fund_id}`);
+          viewButton.setAttribute('aria-controls', 'history');
+          viewButton.addEventListener('click', () => loadHistory(fund.fund_id, viewButton));
+          actionCell.append(viewButton);
+          row.append(actionCell);
           rows.append(row);
         }
         message.textContent = data.funds.length ? `Loaded ${data.funds.length} funds. Refreshed at ${new Date().toLocaleTimeString()}.` : 'No processing results yet.';
