@@ -1,0 +1,6 @@
+# dependencies for the read-only dashboard
+fastapi==0.146.0
+pymongo==4.19.0
+dnspython==2.9.0
+python-dotenv==1.2.4
+uvicorn==0.54.0

@@ -1,0 +1,2 @@
+[tool.vercel]
+entrypoint = "fundflow.app:app"

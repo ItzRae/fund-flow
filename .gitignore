@@ -222,3 +222,6 @@ __marimo__/
 # Local downloads and browser test artifacts
 downloads/
 test-results/
+
+# local vercel project settings
+.vercel/

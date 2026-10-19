@@ -1,0 +1,11 @@
+.env
+.env.*
+.aws/
+.venv/
+venv/
+downloads/
+tests/
+test-results/
+.pytest_cache/
+**/__pycache__/
+dashboard-guide.md
