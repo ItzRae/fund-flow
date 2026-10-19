@@ -1,3 +1,5 @@
+import re
+from typing import Literal
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -114,6 +116,10 @@ def list_fund_holdings(
     request: Request,
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=100),
+    sort_by: Literal["weight_percent", "market_value", "name"] = "weight_percent",
+    direction: Literal["asc", "desc"] = "desc",
+    asset_class: str = Query(default="", max_length=100),
+    search: str = Query(default="", max_length=100),
 ):
     database = request.app.state.database
     try:
@@ -137,10 +143,17 @@ def list_fund_holdings(
 
         # count the whole report, then fetch just the requested page
         holdings_filter = {"snapshot_id": snapshot_id}
+        # options come from the full snapshot so filtering does not hide choices
+        asset_classes = sorted(database["holdings"].distinct("asset_class", holdings_filter))
+        if asset_class:
+            holdings_filter["asset_class"] = asset_class
+        if search.strip():
+            # treat user text literally, not as a regular expression
+            holdings_filter["name"] = {"$regex": re.escape(search.strip()), "$options": "i"}
         total = database["holdings"].count_documents(holdings_filter)
         results = (
             database["holdings"].find(holdings_filter)
-            .sort("row_hash", 1)
+            .sort([(sort_by, 1 if direction == "asc" else -1), ("row_hash", 1)])
             .skip(offset)
             .limit(limit)
         )
@@ -149,6 +162,7 @@ def list_fund_holdings(
         for holding in results:
             # each dictionary here represents one holding, not the whole response
             holdings.append({
+                "currency": holding.get("raw", {}).get("Currency"),
                 "name": holding["name"],
                 "asset_class": holding["asset_class"],
                 "market_value": str(holding["market_value"].to_decimal()),
@@ -164,6 +178,8 @@ def list_fund_holdings(
             "offset": offset,
             "limit": limit,
             "holdings": holdings,
+            "asset_classes": asset_classes,
+            "rejected": run.get("rejected"),
         }
     except PyMongoError:
         raise HTTPException(

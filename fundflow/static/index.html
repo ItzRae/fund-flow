@@ -29,6 +29,9 @@
     .run-id { font-family: monospace; font-size: 12px; }
     .actions { display: flex; gap: 8px; }
     .pagination { display: flex; gap: 12px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
+    .filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 20px 0; }
+    .filters label { display: grid; gap: 6px; font-size: 13px; }
+    input, select { padding: 9px; border: 1px solid #baccc1; border-radius: 5px; background: white; color: inherit; max-width: 100%; }
     .numeric { text-align: right; font-variant-numeric: tabular-nums; }
     footer { margin-top: 20px; font-size: 13px; color: #5e6d67; }
     @media (max-width: 600px) { main { margin-top: 28px; } header { align-items: flex-start; } }
@@ -63,11 +66,19 @@
     <section id="holdings" aria-labelledby="holdings-title" hidden>
       <header><h2 id="holdings-title" tabindex="-1">Holdings</h2><button id="close-holdings" class="secondary" type="button">Close holdings</button></header>
       <p>Latest successfully processed report. This may be older than the latest attempt shown above.</p>
+      <form id="holdings-filters" class="filters">
+        <label>Holding name<input id="holding-search" type="search" maxlength="100" placeholder="Search name"></label>
+        <label>Asset class<select id="holding-class"><option value="">All asset classes</option></select></label>
+        <label>Sort by<select id="holding-sort"><option value="weight_percent">Weight</option><option value="market_value">Market value</option><option value="name">Name</option></select></label>
+        <label>Order<select id="holding-direction"><option value="desc">Descending</option><option value="asc">Ascending</option></select></label>
+        <button type="submit">Apply</button><button id="holding-reset" class="secondary" type="button">Reset</button>
+      </form>
+      <p id="holdings-warning" role="status" hidden></p>
       <p id="holdings-message" role="status" aria-live="polite"></p>
       <div class="table-wrap">
         <table>
           <caption id="holdings-caption">Report holdings</caption>
-          <thead><tr><th scope="col">Name</th><th scope="col">Asset class</th><th scope="col" class="numeric">Market value</th><th scope="col" class="numeric">Weight (%)</th></tr></thead>
+          <thead><tr><th scope="col">Name</th><th scope="col">Asset class</th><th scope="col" class="numeric">Market value</th><th scope="col">Currency</th><th scope="col" class="numeric">Weight (%)</th></tr></thead>
           <tbody id="holdings-rows"></tbody>
         </table>
       </div>
@@ -153,6 +164,26 @@
     let holdingsSnapshot = null;
     let holdingsTrigger = null;
     const pageSize = 50;
+    const filterForm = document.querySelector('#holdings-filters');
+    const searchInput = document.querySelector('#holding-search');
+    const classInput = document.querySelector('#holding-class');
+    const sortInput = document.querySelector('#holding-sort');
+    const directionInput = document.querySelector('#holding-direction');
+    const warning = document.querySelector('#holdings-warning');
+    let filters = {search: '', asset_class: '', sort_by: 'weight_percent', direction: 'desc'};
+    function resetFilters() {
+      filterForm.reset();
+      filters = {search: '', asset_class: '', sort_by: 'weight_percent', direction: 'desc'};
+    }
+    filterForm.addEventListener('submit', event => {
+      event.preventDefault();
+      filters = {search: searchInput.value.trim(), asset_class: classInput.value, sort_by: sortInput.value, direction: directionInput.value};
+      loadHoldings(holdingsFund, 0);
+    });
+    document.querySelector('#holding-reset').addEventListener('click', () => {
+      resetFilters();
+      loadHoldings(holdingsFund, 0);
+    });
 
     function closeHoldings() {
       holdingsRequest++;
@@ -170,6 +201,8 @@
     async function loadHoldings(fundId, offset = 0, trigger = null) {
       const requestId = ++holdingsRequest;
       if (trigger) {
+        resetFilters();
+        classInput.replaceChildren(new Option('All asset classes', ''));
         holdingsTrigger = trigger;
         holdingsSnapshot = null;
       }
@@ -181,11 +214,13 @@
       holdingsRows.replaceChildren();
       holdingsCaption.textContent = 'Report holdings';
       holdingsRange.textContent = '';
+      warning.hidden = true;
       holdingsMessage.textContent = 'Loading holdings…';
       previous.disabled = next.disabled = true;
       retry.hidden = true;
       try {
-        const response = await fetch(`/api/funds/${encodeURIComponent(fundId)}/holdings?offset=${offset}&limit=${pageSize}`);
+        const params = new URLSearchParams({...filters, offset, limit: pageSize});
+        const response = await fetch(`/api/funds/${encodeURIComponent(fundId)}/holdings?${params}`);
         if (requestId !== holdingsRequest) return;
         if (response.status === 404) {
           holdingsMessage.textContent = 'No successfully processed report is available for this fund.';
@@ -201,9 +236,14 @@
           return loadHoldings(fundId, 0);
         }
         holdingsSnapshot = data.snapshot_id;
+        classInput.replaceChildren(new Option('All asset classes', ''));
+        for (const value of data.asset_classes ?? []) classInput.add(new Option(value, value));
+        classInput.value = filters.asset_class;
+        warning.hidden = !(data.rejected > 0);
+        warning.textContent = `This report contains ${data.rejected} rejected rows. Only accepted holdings are shown.`;
         for (const holding of data.holdings) {
           const row = document.createElement('tr');
-          for (const field of ['name', 'asset_class', 'market_value', 'weight_percent']) {
+          for (const field of ['name', 'asset_class', 'market_value', 'currency', 'weight_percent']) {
             const cell = document.createElement('td');
             const numeric = field === 'market_value' || field === 'weight_percent';
             cell.textContent = numeric ? formatDecimal(holding[field]) : (holding[field] ?? '—');
@@ -213,7 +253,7 @@
           holdingsRows.append(row);
         }
         holdingsCaption.textContent = `${fundId} · Report date: ${data.report_date ?? 'Unavailable'}`;
-        holdingsMessage.textContent = data.total ? `${data.total.toLocaleString()} holdings in this report.` : 'This report has no holdings.';
+        holdingsMessage.textContent = data.total ? `${data.total.toLocaleString()} matching holdings.` : 'No holdings match these filters.';
         holdingsRange.textContent = data.holdings.length ? `${offset + 1}–${offset + data.holdings.length} of ${data.total.toLocaleString()}` : 'No rows on this page';
         previous.disabled = offset === 0;
         next.disabled = offset + pageSize >= data.total;
