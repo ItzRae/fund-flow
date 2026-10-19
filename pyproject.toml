@@ -1,2 +1,14 @@
+[project]
+name = "fundflow-dashboard"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi==0.146.0",
+    "pymongo==4.19.0",
+    "dnspython==2.9.0",
+    "python-dotenv==1.2.4",
+    "uvicorn==0.54.0",
+]
+
 [tool.vercel]
 entrypoint = "fundflow.app:app"
