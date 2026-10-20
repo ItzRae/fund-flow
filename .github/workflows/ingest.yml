@@ -1,0 +1,126 @@
+name: Collect and process fund reports
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+# let an active ingestion finish before another starts
+concurrency:
+  group: fundflow-ingestion
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    # restricts execution to main
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      S3_BUCKET: ${{ vars.S3_BUCKET }}
+      MONGODB_DATABASE: ${{ vars.MONGODB_DATABASE }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Check configuration
+        env:
+          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+        run: |
+          python - <<'PY'
+          import os
+          required = ['AWS_ROLE_ARN', 'AWS_REGION', 'S3_BUCKET', 'MONGODB_DATABASE', 'MONGODB_URI']
+          missing = [key for key in required if not os.environ.get(key)]
+          if missing:
+              raise SystemExit('Missing GitHub configuration: ' + ', '.join(missing))
+          PY
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run offline tests
+        run: python -m pytest
+
+      - name: Authenticate to AWS
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: fundflow-${{ github.run_id }}
+
+      - name: Check MongoDB connection
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+        run: python -m fundflow.db
+
+      - name: Collect reports
+        id: collect
+        # process successful downloads even when another fund fails
+        continue-on-error: true
+        run: |
+          python -m fundflow.collect \
+            --bucket "$S3_BUCKET" \
+            --region "$AWS_REGION" \
+            --download-dir downloads
+
+      - name: Process collected reports
+        id: process
+        continue-on-error: true
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+        shell: bash
+        run: |
+          shopt -s nullglob
+          summaries=(downloads/*/summary.json)
+          if [ "${#summaries[@]}" -ne 1 ]; then
+            echo "Expected exactly one collection summary; processing cannot continue."
+            exit 1
+          fi
+          mkdir -p run-results
+          # pipefail preserves the command's failure status while tee saves output
+          set -o pipefail
+          python -m fundflow.process \
+            --summary "${summaries[0]}" \
+            --region "$AWS_REGION" \
+            --store | tee run-results/processing-output.txt
+
+      - name: Save run summaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fundflow-summaries-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            downloads/*/summary.json
+            run-results/processing-output.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Report pipeline outcome
+        if: always()
+        env:
+          COLLECTION_OUTCOME: ${{ steps.collect.outcome }}
+          PROCESSING_OUTCOME: ${{ steps.process.outcome }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          collection = os.environ['COLLECTION_OUTCOME']
+          processing = os.environ['PROCESSING_OUTCOME']
+          with Path(os.environ['GITHUB_STEP_SUMMARY']).open('a') as summary:
+              summary.write(f'## FundFlow ingestion\n\n| Stage | Outcome |\n| --- | --- |\n| Collection | {collection} |\n| Processing | {processing} |\n\n')
+              summary.write('Download available summary artifacts for per-fund results. Processing output is JSON on normal completion; startup failures may contain diagnostic text. Reports with rejected rows can complete; inspect their recorded outcomes in the dashboard.\n')
+          if collection != 'success' or processing != 'success':
+              raise SystemExit('Pipeline incomplete; inspect the failed steps and summaries.')
+          PY
