@@ -1,10 +1,12 @@
 # FundFlow
 
+[Live dashboard](https://fund-flow-sepia.vercel.app/) · [Pipeline runs](https://github.com/ItzRae/fund-flow/actions/workflows/ingest.yml)
+
 I built FundFlow to automate a recurring investment operations task: retrieve a fund's holdings report, validate its contents, and make the results available for review. I wanted to work with real reports and keep the cleaned data traceable to its original source.
 
 The pipeline collects public iShares holdings reports for **IVV, ITOT, AGG, IEFA, and SHY**, preserves the original CSV files in an **AWS S3 bucket**, and stores validated holdings in **MongoDB Atlas**. A read-only **FastAPI dashboard hosted on Vercel** lets visitors inspect holdings, review processing history, and see which attempts completed or failed.
 
-**Technologies:** Python · Playwright · AWS S3 · MongoDB Atlas · FastAPI · pytest · Vercel
+**Technologies:** Python · Playwright · AWS S3 · MongoDB Atlas · FastAPI · pytest · GitHub Actions · Vercel
 
 The CSV can also be downloaded directly over HTTP. I'm using Playwright to learn it, having previously used Selenium, and to practice browser-based collection with a page object and pytest fixtures.
 
@@ -16,23 +18,27 @@ The CSV can also be downloaded directly over HTTP. I'm using Playwright to learn
 - Records accepted and rejected rows, including rejection reasons.
 - Writes holdings in batches of 250, prints progress, and records acknowledged inserted/unchanged counts.
 - Avoids duplicate holdings when the same snapshot is processed again. Each processing attempt still has its own history record.
+- Runs collection and processing through a manual GitHub Actions workflow, with temporary AWS credentials and downloadable run summaries.
 
 ## Architecture
 
 ```text
+manual GitHub Actions trigger (or local CLI)
+         |
+         v
 configured iShares funds
          |
          v
 Playwright page object
          |
          v
-original CSV + source metadata in S3
+original CSV + source metadata in AWS S3
          |
          v
 retrieve -> verify checksum -> parse -> validate
                                           |
                                           v
-                          MongoDB snapshots, holdings, runs
+                          MongoDB Atlas: snapshots, holdings, runs
                                           |
                                           v
                                      FastAPI
@@ -50,6 +56,38 @@ The dashboard shows the latest processing attempt for each fund. **View history*
 Holdings are paginated, with name search, an asset-class filter, and sorting by weight, market value, or name. Sorting and filtering happen before pagination. The table shows the report date, currency, and a notice if the selected report had rejected rows.
 
 The app is deployed on Vercel. Its configuration uses Python 3.12 and the `fundflow.app:app` entrypoint. Deployment credentials belong in environment variables; the hosted dashboard should use a MongoDB user with read-only access to `fundflow`.
+
+## Run the pipeline
+
+I added a manual GitHub Actions workflow so the full pipeline can run without my laptop or local AWS login. It has completed a run, with new processing attempts visible in the dashboard.
+
+From the repository's **Actions** tab, choose **Collect and process fund reports → Run workflow → main**. Running it requires repository permissions; visitors can explore the dashboard without triggering ingestion.
+
+The [workflow](.github/workflows/ingest.yml):
+
+1. Checks configuration, installs Python 3.12 and Chromium, and runs the offline tests.
+2. Uses GitHub OIDC to obtain temporary AWS credentials, then checks MongoDB connectivity.
+3. Collects the configured reports and passes the saved batch summary to processing.
+4. Saves available collection summaries and processing output as artifacts for 14 days.
+5. Reports collection and processing outcomes in the GitHub run summary.
+
+If one fund fails collection, successfully downloaded reports can still be processed. The final workflow result stays failed if either stage fails. A completed report can contain rejected rows, so I check the per-fund outcomes as well as the overall green check.
+
+The dashboard shows the resulting processing attempts and holdings. Its Refresh button reads saved database results; it doesn't start a new ingestion. The holdings report date comes from the source file and can be older than the processing timestamp.
+
+To configure the workflow in another repository:
+
+| GitHub setting | Purpose |
+| --- | --- |
+| Variable `AWS_ROLE_ARN` | IAM role trusted by the repository's OIDC identity on `main`. |
+| Variable `AWS_REGION` | AWS region, currently `us-east-2`. |
+| Variable `S3_BUCKET` | Bucket for original reports. |
+| Variable `MONGODB_DATABASE` | Database name, currently `fundflow`. |
+| Secret `MONGODB_URI` | Connection string for the workflow's database user. |
+
+The AWS role needs object read/write access under the bucket's `runs/` prefix. The workflow's MongoDB user needs read/write access to the database, and Atlas must allow connections from the runner. The deployed dashboard uses separate credentials with read-only access.
+
+I kept the trigger manual so I can control when collection runs and inspect its results. Scheduling and checking whether a report has changed before processing are possible follow-ups; neither is implemented yet.
 
 ## Local setup
 
@@ -77,7 +115,7 @@ For collection and S3 retrieval, configure AWS credentials with access to your b
 
 ## CLI commands
 
-I added command-line entrypoints so I could check each stage independently, repeat a failed step, and later connect the same commands to an automation workflow.
+I added command-line entrypoints so I could check each stage independently, repeat a failed step, and reuse the same commands in GitHub Actions.
 
 | Command | Purpose |
 | --- | --- |
@@ -152,10 +190,10 @@ python -m pytest -m live --headed
 
 These visit the configured fund pages and check downloads. Live tests require internet access and are excluded by default.
 
-## Scope and next step
+## Scope and limitations
 
 The five configured funds have been collected and processed with real reports. This covers selected equity and bond reports, not every iShares format.
 
 Deduplication uses the fund, file hash, and original row contents. It prevents exact repeats; it doesn't identify the same security across different reports or resolve conflicting business records. Changed processing versions require an explicit snapshot rebuild rather than silently mixing interpretations. Reports are still parsed in memory.
 
-Next is a manually triggered GitHub Actions workflow to connect collection and processing and retain their summaries. Scheduling isn't implemented yet.
+The current focus is inspecting reports and understanding processing outcomes. Fund comparisons, automated scheduling, and live service-health monitoring are outside the current scope.
